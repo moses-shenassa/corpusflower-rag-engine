@@ -1,161 +1,249 @@
-
 from __future__ import annotations
 
 import logging
-from typing import List, Dict, Any, Tuple
+import textwrap
+from typing import Any, Dict, Iterable, List, Tuple
 
 import chromadb
+from chromadb.api import ClientAPI
 from openai import OpenAI
 
 from .config import (
-    require_api_key,
     OPENAI_MODEL,
     OPENAI_EMBEDDING_MODEL,
     INDEX_PATH,
+    require_api_key,
 )
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------------------
-# OpenAI / Chroma clients
-# --------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_text(text: str) -> str:
+    """
+    Remove surrogate code points and coerce non-string values to string.
+
+    This prevents:
+      - UnicodeEncodeError: 'utf-8' codec can't encode surrogates
+      - JSON encoding failures in the OpenAI client
+      - UTF-8 issues when Chroma stores documents
+    """
+    if not isinstance(text, str):
+        text = str(text)
+
+    # Strip surrogate codepoints (UTF-16 halves) that are illegal in UTF-8
+    return "".join(ch for ch in text if not (0xD800 <= ord(ch) <= 0xDFFF))
+
+
+def _sanitize_texts(texts: Iterable[str]) -> List[str]:
+    return [_sanitize_text(t) for t in texts]
+
+
+# ---------------------------------------------------------------------------
+# OpenAI + Chroma client helpers
+# ---------------------------------------------------------------------------
+
+_openai_client: OpenAI | None = None
+_chroma_client: ClientAPI | None = None
+
+# Collection names (must match what ingest_pdfs.py uses)
+CHUNK_COLLECTION_NAME = "corpusflower_chunks"
+DOCS_COLLECTION_NAME = "corpusflower_docs"
 
 
 def get_openai_client() -> OpenAI:
     """
-    Lightweight helper to create an OpenAI client using the API key resolved
-    via our config module.
+    Lazily create and cache a single OpenAI client.
+
+    Uses require_api_key() from backend.config to ensure an API key is set
+    in the environment, then relies on the OpenAI library's default loading.
     """
-    api_key = require_api_key()
-    return OpenAI(api_key=api_key)
+    global _openai_client
+    if _openai_client is not None:
+        return _openai_client
+
+    # This should assert that OPENAI_API_KEY is configured and/or set env vars.
+    require_api_key()
+
+    # Let the OpenAI client read from environment variables
+    _openai_client = OpenAI()
+    return _openai_client
 
 
-def get_client() -> chromadb.PersistentClient:
+def get_client() -> ClientAPI:
     """
-    Create (or reuse) a persistent Chroma client rooted at INDEX_PATH.
-
-    We use a persistent client so that repeated runs of the app share the same
-    vector store built by the ingestion script.
+    Return a shared persistent Chroma client using INDEX_PATH from config.
+    This is what both the indexer and backend should use.
     """
-    return chromadb.PersistentClient(path=INDEX_PATH)
+    global _chroma_client
+    if _chroma_client is not None:
+        return _chroma_client
+
+    _chroma_client = chromadb.PersistentClient(path=str(INDEX_PATH))
+    return _chroma_client
 
 
-# --------------------------------------------------------------------------------------
-# Embeddings
-# --------------------------------------------------------------------------------------
-
-
-def embed_text(texts: List[str], batch_size: int = 64) -> List[List[float]]:
+def _get_collections(client: ClientAPI | None = None):
     """
-    Embed a list of strings using the configured OpenAI embedding model.
+    Helper that returns (chunks_collection, docs_collection).
 
-    This function is used in two places:
-    - During ingestion (to embed chunks and document summaries)
-    - At query time (to embed the user's question for retrieval)
-
-    It batches requests so that we never exceed the max-tokens-per-request
-    limit on the embeddings endpoint.
+    Used by:
+      - Simple RAG retrieval helpers in this module
+      - GraphRAG (backend.graphrag) via its imports
     """
-    if not texts:
-        return []
+    if client is None:
+        client = get_client()
 
+    chunks_col = client.get_or_create_collection(name=CHUNK_COLLECTION_NAME)
+    docs_col = client.get_or_create_collection(name=DOCS_COLLECTION_NAME)
+    return chunks_col, docs_col
+
+
+# ---------------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------------
+
+
+def embed_text(texts: List[str]) -> List[List[float]]:
+    """
+    Embed a batch of texts using the configured OpenAI embedding model.
+
+    NOTE:
+        - The name is singular (embed_text) for historical reasons; it takes
+          a *list* of texts and returns a list of embeddings.
+        - To avoid hitting the OpenAI `max_tokens_per_request` limit, we send
+          the inputs in smaller sub-batches.
+    """
     client = get_openai_client()
-    all_embeddings: List[List[float]] = []
+    clean_inputs = _sanitize_texts(texts)
 
-    # Simple batching by number of inputs. With our chunk sizes this is
-    # comfortably under the 300k-token per-request limit.
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
+    # Conservative batch size: 32 texts per request.
+    # Even if each text is near the per-input token limit, 32 keeps us safely
+    # under the 300k tokens-per-request limit enforced by the API.
+    MAX_TEXTS_PER_BATCH = 32
+
+    all_embeddings: List[List[float]] = []
+    for i in range(0, len(clean_inputs), MAX_TEXTS_PER_BATCH):
+        batch = clean_inputs[i : i + MAX_TEXTS_PER_BATCH]
         resp = client.embeddings.create(
             model=OPENAI_EMBEDDING_MODEL,
             input=batch,
         )
-        for item in resp.data:
-            all_embeddings.append(item.embedding)
+        all_embeddings.extend(item.embedding for item in resp.data)
 
     return all_embeddings
 
 
-# --------------------------------------------------------------------------------------
-# Retrieval helpers
-# --------------------------------------------------------------------------------------
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """Backward-compatible alias used by older / patched indexer code."""
+    return embed_text(texts)
 
 
-def _get_collections(client: chromadb.PersistentClient):
-    """
-    Helper to get (or lazily create) the two collections used by CorpusFlower:
 
-    - bob_chunks: page / logical chunks (fine-grained retrieval)
-    - bob_docs: document-level summaries (coarser topical retrieval)
-    """
-    chunks = client.get_or_create_collection(name="bob_chunks")
-    docs = client.get_or_create_collection(name="bob_docs")
-    return chunks, docs
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """Backward-compatible alias used by older / patched indexer code."""
+    return embed_text(texts)
 
 
-def retrieve_for_question(
+# ---------------------------------------------------------------------------
+# Semantic retrieval helpers
+# ---------------------------------------------------------------------------
+
+
+def retrieve_semantic_passages(
     question: str,
-    n_doc_summaries: int = 5,
-    n_passages: int = 15,
+    *,
+    top_k_passages: int = 24,
+    top_k_doc_summaries: int = 8,
+    client: ClientAPI | None = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Retrieve both coarse document summaries and fine-grained passages
-    for a given question.
+    Retrieve both document-level summaries and chunk-level passages for a query.
 
     Returns:
-        doc_summaries: list of {id, text, metadata, distance}
-        passages: list of {id, text, metadata, distance}
+        (doc_summaries, passages)
+
+        doc_summaries: [
+          {
+            "doc_id": str,
+            "summary": str,
+            "metadata": {...},
+            "distance": float,
+          },
+          ...
+        ]
+
+        passages: [
+          {
+            "chunk_id": str,
+            "text": str,
+            "metadata": {...},
+            "distance": float,
+          },
+          ...
+        ]
     """
-    client = get_client()
+    if client is None:
+        client = get_client()
+
     chunks_col, docs_col = _get_collections(client)
 
-    # Embed the question once and use the same embedding in both queries.
+    # Embed the question once
     q_embedding = embed_text([question])[0]
 
-    # Doc-level retrieval (coarse topical)
-    docs_res = docs_col.query(
+    # Chunk-level retrieval
+    chunk_res = chunks_col.query(
         query_embeddings=[q_embedding],
-        n_results=n_doc_summaries,
-        include=["documents", "metadatas", "distances"],
-    )
-
-    doc_summaries: List[Dict[str, Any]] = []
-    if docs_res and docs_res.get("documents"):
-        for doc_id, text, meta, dist in zip(
-            docs_res["ids"][0],
-            docs_res["documents"][0],
-            docs_res["metadatas"][0],
-            docs_res["distances"][0],
-        ):
-            doc_summaries.append(
-                {"id": doc_id, "text": text, "metadata": meta, "distance": dist}
-            )
-
-    # Passage-level retrieval (fine local detail)
-    chunks_res = chunks_col.query(
-        query_embeddings=[q_embedding],
-        n_results=n_passages,
-        include=["documents", "metadatas", "distances"],
+        n_results=top_k_passages,
     )
 
     passages: List[Dict[str, Any]] = []
-    if chunks_res and chunks_res.get("documents"):
-        for cid, text, meta, dist in zip(
-            chunks_res["ids"][0],
-            chunks_res["documents"][0],
-            chunks_res["metadatas"][0],
-            chunks_res["distances"][0],
-        ):
-            passages.append(
-                {"id": cid, "text": text, "metadata": meta, "distance": dist}
-            )
+    for doc_id, metadata, text, distance in zip(
+        chunk_res.get("ids", [[]])[0],
+        chunk_res.get("metadatas", [[]])[0],
+        chunk_res.get("documents", [[]])[0],
+        chunk_res.get("distances", [[]])[0],
+    ):
+        passages.append(
+            {
+                "chunk_id": doc_id,
+                "text": text,
+                "metadata": metadata or {},
+                "distance": float(distance),
+            }
+        )
+
+    # Doc-level retrieval (summaries)
+    doc_res = docs_col.query(
+        query_embeddings=[q_embedding],
+        n_results=top_k_doc_summaries,
+    )
+
+    doc_summaries: List[Dict[str, Any]] = []
+    for doc_id, metadata, text, distance in zip(
+        doc_res.get("ids", [[]])[0],
+        doc_res.get("metadatas", [[]])[0],
+        doc_res.get("documents", [[]])[0],
+        doc_res.get("distances", [[]])[0],
+    ):
+        doc_summaries.append(
+            {
+                "doc_id": doc_id,
+                "summary": text,
+                "metadata": metadata or {},
+                "distance": float(distance),
+            }
+        )
 
     return doc_summaries, passages
 
 
-# --------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Context block construction
-# --------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 
 def build_context_blocks(
@@ -164,48 +252,51 @@ def build_context_blocks(
     max_blocks: int = 12,
 ) -> List[str]:
     """
-    Turn retrieved summaries + passages into a list of context blocks
-    for the LLM.
+    Turn doc_summaries + passages into a list of string context blocks
+    which can be fed directly into an LLM prompt.
 
-    We keep formatting intentionally lightweight and conversational so
-    answers don't sound like a wiki dump, but each block is still
-    clearly labeled and citable.
+    This is what backend.main._run_graph_rag imports and uses.
     """
+
     blocks: List[str] = []
 
-    # First, document summaries
-    for i, doc in enumerate(doc_summaries, start=1):
+    # 1) Add document-level summaries first (coarse context)
+    for doc in doc_summaries:
         meta = doc.get("metadata") or {}
-        src = meta.get("source", "unknown source")
-        lang = meta.get("language", "unknown")
-        title = meta.get("title", src)
-        dist = doc.get("distance")
+        title = meta.get("title") or meta.get("file_name") or "Document"
+        source = meta.get("source") or meta.get("file_path") or ""
+        summary = doc.get("summary") or ""
 
-        header = f"Source #{i}: {title} (language={lang}, distance={dist:.3f} from query)"
-        block = f"[DOCUMENT SUMMARY]\n{header}\n\n{doc['text']}"
+        block = textwrap.dedent(
+            f"""
+            [DOCUMENT SUMMARY]
+            Title: {title}
+            Source: {source}
+            Summary:
+            {summary.strip()}
+            """
+        ).strip()
         blocks.append(block)
 
-    # Then, detailed passages
-    for j, p in enumerate(passages, start=1):
+        if len(blocks) >= max_blocks:
+            return blocks
+
+    # 2) Then add the highest-scoring passages (fine-grained evidence)
+    for p in passages:
         meta = p.get("metadata") or {}
-        src = meta.get("source", "unknown source")
-        lang = meta.get("language", "unknown")
-        page = meta.get("page_start")
-        chunk_idx = meta.get("chunk_index")
-        dist = p.get("distance")
+        title = meta.get("title") or meta.get("file_name") or "Document"
+        loc = meta.get("location") or meta.get("page_label") or ""
+        text = p.get("text") or ""
 
-        loc_bits = []
-        if page is not None:
-            loc_bits.append(f"page {page}")
-        if chunk_idx is not None:
-            loc_bits.append(f"chunk {chunk_idx}")
-        loc_str = ", ".join(loc_bits) if loc_bits else "location unknown"
+        header_extra = f" — {loc}" if loc else ""
+        block = textwrap.dedent(
+            f"""
+            [PASSAGE]
+            From: {title}{header_extra}
 
-        header = (
-            f"Passage #{j} from {src} ({loc_str}, language={lang}, "
-            f"distance={dist:.3f} from query)"
-        )
-        block = f"[PASSAGE]\n{header}\n\n{p['text']}"
+            {text.strip()}
+            """
+        ).strip()
         blocks.append(block)
 
         if len(blocks) >= max_blocks:

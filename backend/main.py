@@ -11,7 +11,7 @@ from .reasoning import answer_question_with_rag
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="CorpusFlower Occult RAG API (Graph-RAG enabled)")
+app = FastAPI(title="CorpusFlower RAG API (Graph-RAG enabled)")
 
 
 class AnswerRequest(BaseModel):
@@ -40,7 +40,7 @@ def _run_graph_rag(question: str) -> Dict[str, Any]:
     question = question.strip()
     if not question:
         return {
-            "answer": "Ask me something, preferably about magic.",
+            "answer": "Ask me something about the documents you have indexed.",
             "raw_context": {},
         }
 

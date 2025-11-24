@@ -1,17 +1,17 @@
 # CorpusFlower Branding & Visual Identity
 
-CorpusFlower is positioned as a **dark-academia botanical concordance engine**:
-a tool that lets meaning bloom organically from a body of text (the corpus).
+CorpusFlower is positioned as a **document intelligence and concordance engine**:
+a tool that lets insight emerge from large collections of text (the corpus).
 
 ## Brand Pillars
 
 1. **Illumination**  
-   CorpusFlower shines light on buried patterns, references, and themes within text corpora.
+   CorpusFlower surfaces patterns, references, and themes within text corpora.
 
 2. **Blooming Insight**  
     Knowledge is treated as something that grows from roots and stems into petals and flowers.
 
-3. **Scholarly Ritual**  
+3. **Scholarly Practice**  
    The tool is inspired by monastic scriptoria, devotional reading, and disciplined study.
 
 4. **Botanical Metaphor**  
@@ -72,7 +72,7 @@ Suggested typefaces and direction:
 
 Tone:
 - Scholarly, calm, and reflective.
-- Occult-adjacent but tasteful.
+- Serious, scholarly, and understated.
 - Focused on illumination and emergence, not on shock or spectacle.
 
 Preferred verbs and metaphors:

@@ -23,22 +23,22 @@ def detect_language(text: str) -> str:
 
 def guess_tradition_from_text(text: str) -> str:
     """
-    Extremely simple heuristic to tag a text with a likely 'tradition' label.
+    Extremely simple heuristic to tag a text with a rough domain/context label.
 
     This is intentionally conservative. It does not attempt to be authoritative;
-    it only gives CorpusFlower a hint about which stream(s) of magic a given PDF might
-    belong to, so that he can speak more clearly about context.
+    it only gives CorpusFlower a hint about which stream(s) of thought a given PDF might
+    belong to, so that it can speak more clearly about context.
     """
     lowered = text.lower()
 
     if any(k in lowered for k in ["kabbalah", "sefirot", "sephiroth", "tiferet", "binah", "yesod"]):
         return "Jewish mysticism / Kabbalah (heuristic)"
     if any(k in lowered for k in ["psalm", "psalms", "jesus", "mary", "saint", "angel"]):
-        return "Christian / folk Catholic / grimoire-adjacent (heuristic)"
+        return "Christian / folk Catholic devotional / liturgical material (heuristic)"
     if any(k in lowered for k in ["hoodoo", "conjure", "rootwork", "mojo", "jack ball"]):
         return "African American hoodoo / conjure (heuristic)"
-    if any(k in lowered for k in ["pentacle", "pentagram", "solomon", "goetia", "grimoire", "seal of"]):
-        return "Solomonic / ceremonial grimoire magic (heuristic)"
+    if any(k in lowered for k in ["pentacle", "pentagram", "solomon", "goetia",  "seal of"]):
+        return "Solomonic / ceremonial esoteric text (heuristic)"
     if any(k in lowered for k in ["thelema", "crowley", "a\'a", "ordo templi orientis"]):
         return "Thelemic / modern ceremonial (heuristic)"
     if any(k in lowered for k in ["golden dawn", "lbrp", "rose cross", "shemesh", "mizrah"]):
@@ -46,7 +46,7 @@ def guess_tradition_from_text(text: str) -> str:
     if any(k in lowered for k in ["spiritism", "espiritismo", "mesa blanca"]):
         return "Spiritism / Espiritismo (heuristic)"
 
-    return "Unknown / mixed tradition (heuristic)"
+    return "Unknown / mixed domain (heuristic)"
 
 
 SYMBOL_KEYWORDS = [

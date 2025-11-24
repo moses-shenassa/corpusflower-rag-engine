@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2025-11-19
 ### Added
-- Initial public release of **CorpusFlower**, rebranded from the earlier "Bob" prototype.
+- Initial public release of **CorpusFlower**, evolved from an earlier internal prototype.
 - PDF ingestion pipeline (StemParser) for walking a directory of PDFs, extracting and chunking text.
 - Local embedding and vector index layer (RootIndex) for semantic similarity search.
 - Retrieval layer (PetalRetriever) for concordance-style lookup and context window exploration.

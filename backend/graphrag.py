@@ -133,7 +133,7 @@ def graph_rag_retrieve(
     #    metadata filter so we only search within that document's chunks.
     #
     # We use a simple per-doc budget heuristic so that we don't let a single
-    # huge grimoire monopolize all the retrieved passages.
+    # very large document monopolize all the retrieved passages.
     all_passages: List[Dict[str, Any]] = []
     if doc_ids:
         # Rough per-doc budget; we ensure at least 1 result per doc.

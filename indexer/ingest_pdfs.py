@@ -13,7 +13,7 @@ from tqdm import tqdm
 from openai import OpenAI
 
 from backend.config import PDF_PATH, OPENAI_MODEL, require_api_key
-from backend.retrieval import get_client, embed_text
+from backend.retrieval import get_client, embed_texts
 from indexer.manifest import load_manifest, save_manifest, file_fingerprint
 from indexer.chunking import chunk_text
 from indexer.pdf_ocr import extract_text_from_pdf
@@ -23,6 +23,54 @@ from concordance.index import append_occurrences
 
 LOG_FILE = Path("logs/ingest.log")
 console = Console()
+
+
+
+# ----------------------------------------------------------------------------------
+# String sanitization for safe indexing (Chroma / UTF-8)
+# ----------------------------------------------------------------------------------
+
+def _clean_string(value: Any) -> str:
+    """Return a UTF-8 safe string with surrogate codepoints removed.
+
+    Some PDFs contain broken Unicode (lone surrogates) that will cause
+    downstream libraries (like Chroma's Rust bindings) to raise
+    UnicodeEncodeError when encoding to UTF-8. This helper normalizes
+    *any* input to a plain Python str, strips surrogate codepoints,
+    and re-encodes with errors ignored so we never pass invalid
+    sequences into external systems.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        try:
+            value = str(value)
+        except Exception:
+            value = ""
+    if not value:
+        return ""
+
+    # Remove surrogate codepoints explicitly.
+    filtered = "".join(ch for ch in value if not (0xD800 <= ord(ch) <= 0xDFFF))
+    # Round-trip through UTF-8 to drop any remaining invalid sequences.
+    return filtered.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+
+
+def _clean_documents(docs: List[str]) -> List[str]:
+    return [_clean_string(d) for d in docs]
+
+
+def _clean_metadatas(metas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for meta in metas:
+        new_meta: Dict[str, Any] = {}
+        for k, v in meta.items():
+            if isinstance(v, str):
+                new_meta[k] = _clean_string(v)
+            else:
+                new_meta[k] = v
+        cleaned.append(new_meta)
+    return cleaned
 
 
 # ----------------------------------------------------------------------------------
@@ -88,12 +136,12 @@ def _summarize_document(text: str, language: str, title: str) -> str:
 
     snippet = text[:8000]
     prompt = (
-        "You are building an internal catalog description for an occult library.\n"
+        "You are building an internal catalog description for an enterprise document repository.\n"
         f"Document title: {title}\n"
         f"Detected language: {language}\n\n"
         "Below is an excerpt from the document. Write a concise 1–2 paragraph summary "
-        "of its contents, focusing on magical / occult topics, traditions, and key ideas. "
-        "Do not invent content that is not supported by the text.\n\n"
+        "of its contents, focusing on key topics, entities, and themes that would help a researcher "
+        "quickly understand what the document is about. Do not invent content that is not supported by the text.\n\n"
         "--- DOCUMENT EXCERPT ---\n"
         f"{snippet}\n"
         "--- END EXCERPT ---\n"
@@ -102,7 +150,7 @@ def _summarize_document(text: str, language: str, title: str) -> str:
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
-            {"role": "system", "content": "You are an expert occult librarian and cataloger."},
+            {"role": "system", "content": "You are an expert research librarian and cataloger."},
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
@@ -188,8 +236,8 @@ def ingest_pdfs() -> None:
     updated_manifest: Dict[str, Any] = {}
 
     client = get_client()
-    chunks_col = client.get_or_create_collection(name="bob_chunks")
-    docs_col = client.get_or_create_collection(name="bob_docs")
+    chunks_col = client.get_or_create_collection(name="corpusflower_chunks")
+    docs_col = client.get_or_create_collection(name="corpusflower_docs")
 
     # Determine which files actually need work
     to_ingest: List[Path] = []
@@ -265,7 +313,7 @@ def ingest_pdfs() -> None:
         summary_text = _summarize_document(full_text, language=language, title=title)
         all_texts = chunk_texts + [summary_text]
 
-        embeddings = embed_text(all_texts)
+        embeddings = embed_texts(all_texts)
         if not embeddings:
             logger.warning(f"{path.name}: embedding call returned no vectors; skipping.")
             continue
@@ -274,27 +322,31 @@ def ingest_pdfs() -> None:
         summary_embedding = embeddings[-1]
 
         # Upsert document summary
+        summary_metadata = {
+            "source": _clean_string(path.name),
+            "title": _clean_string(title),
+            "language": _clean_string(language),
+            "page_count": page_count,
+        }
+
         docs_col.upsert(
-            ids=[doc_id],
-            documents=[summary_text],
-            metadatas=[
-                {
-                    "source": path.name,
-                    "title": title,
-                    "language": language,
-                    "page_count": page_count,
-                }
-            ],
+            ids=[_clean_string(doc_id)],
+            documents=_clean_documents([summary_text]),
+            metadatas=_clean_metadatas([summary_metadata]),
             embeddings=[summary_embedding],
         )
 
         # Upsert chunks (now without 'terms' in metadata)
         chunk_ids = [f"{doc_id}::chunk-{c['index']}" for c in chunks]
 
+        clean_chunk_ids = [_clean_string(cid) for cid in chunk_ids]
+        clean_chunk_texts = _clean_documents(chunk_texts)
+        clean_chunk_metas = _clean_metadatas(chunk_metas)
+
         chunks_col.upsert(
-            ids=chunk_ids,
-            documents=chunk_texts,
-            metadatas=chunk_metas,
+            ids=clean_chunk_ids,
+            documents=clean_chunk_texts,
+            metadatas=clean_chunk_metas,
             embeddings=chunk_embeddings,
         )
 
