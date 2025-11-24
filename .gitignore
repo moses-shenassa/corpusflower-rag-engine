@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Venv
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+
+# Logs
+logs/
+!logs/README.md
+
+# Ingest artifacts (adjust names to match your config)
+chroma_db/
+chroma/
+data/
+data_*/
+pdfs/
+pdf_corpus/
+corpus/
+corpus_*/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
